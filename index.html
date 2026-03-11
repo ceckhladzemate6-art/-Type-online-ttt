@@ -1,0 +1,339 @@
+import React, { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, 
+  doc, 
+  setDoc, 
+  onSnapshot, 
+  updateDoc, 
+  getDoc
+} from 'firebase/firestore';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  signInWithCustomToken, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { Users, Trophy, LogIn, Plus, RefreshCw, X, Circle, Copy, Check, LogOut } from 'lucide-react';
+
+// --- Firebase Configuration ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'multiplayer-ttt-demo';
+
+const App = () => {
+  const [user, setUser] = useState(null);
+  const [gameId, setGameId] = useState('');
+  const [gameState, setGameState] = useState(null);
+  const [inputGameId, setInputGameId] = useState('');
+  const [error, setError] = useState('');
+  const [copied, setCopied] = useState(false);
+
+  // 1. Auth & Initialization
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth error:", err);
+        setError("Failed to authenticate.");
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  // 2. Listen to Game State
+  useEffect(() => {
+    if (!user || !gameId) return;
+
+    const gameRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', gameId);
+    const unsubscribe = onSnapshot(gameRef, (snapshot) => {
+      if (snapshot.exists()) {
+        setGameState(snapshot.data());
+      } else {
+        setError("Game not found.");
+        setGameId('');
+      }
+    }, (err) => {
+      console.error("Firestore error:", err);
+      setError("Lost connection to game.");
+    });
+
+    return () => unsubscribe();
+  }, [user, gameId]);
+
+  // --- Game Logic Functions ---
+
+  const createGame = async () => {
+    if (!user) return;
+    const newId = Math.random().toString(36).substring(2, 7).toUpperCase();
+    const initialData = {
+      board: Array(9).fill(null),
+      playerX: user.uid,
+      playerO: null,
+      turn: 'X',
+      winner: null,
+      status: 'waiting',
+      createdAt: Date.now()
+    };
+
+    try {
+      const gameRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', newId);
+      await setDoc(gameRef, initialData);
+      setGameId(newId);
+      setError('');
+    } catch (err) {
+      setError("Could not create game.");
+    }
+  };
+
+  const joinGame = async (idToJoin) => {
+    if (!user || !idToJoin) return;
+    const cleanId = idToJoin.trim().toUpperCase();
+    const gameRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', cleanId);
+
+    try {
+      const snap = await getDoc(gameRef);
+      if (!snap.exists()) {
+        setError("Game does not exist.");
+        return;
+      }
+
+      const data = snap.data();
+      
+      // Update only if slot O is empty AND you aren't player X
+      if (!data.playerO && data.playerX !== user.uid) {
+        await updateDoc(gameRef, {
+          playerO: user.uid,
+          status: 'playing'
+        });
+      }
+      
+      setGameId(cleanId);
+      setError('');
+    } catch (err) {
+      setError("Error joining game.");
+    }
+  };
+
+  const makeMove = async (index) => {
+    if (!gameState || gameState.winner || gameState.board[index] || gameState.status !== 'playing') return;
+
+    const myRole = user.uid === gameState.playerX ? 'X' : (user.uid === gameState.playerO ? 'O' : null);
+    if (!myRole || myRole !== gameState.turn) return;
+
+    const newBoard = [...gameState.board];
+    newBoard[index] = myRole;
+    
+    const winner = checkWinner(newBoard);
+    const isDraw = !winner && newBoard.every(cell => cell !== null);
+
+    const gameRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', gameId);
+    await updateDoc(gameRef, {
+      board: newBoard,
+      turn: gameState.turn === 'X' ? 'O' : 'X',
+      winner: winner || (isDraw ? 'draw' : null),
+      status: (winner || isDraw) ? 'finished' : 'playing'
+    });
+  };
+
+  const checkWinner = (board) => {
+    const lines = [
+      [0, 1, 2], [3, 4, 5], [6, 7, 8],
+      [0, 3, 6], [1, 4, 7], [2, 5, 8],
+      [0, 4, 8], [2, 4, 6]
+    ];
+    for (let line of lines) {
+      const [a, b, c] = line;
+      if (board[a] && board[a] === board[b] && board[a] === board[c]) return board[a];
+    }
+    return null;
+  };
+
+  const resetGame = async () => {
+    if (!gameId) return;
+    const gameRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', gameId);
+    await updateDoc(gameRef, {
+      board: Array(9).fill(null),
+      turn: 'X',
+      winner: null,
+      status: gameState?.playerO ? 'playing' : 'waiting'
+    });
+  };
+
+  const copyCode = () => {
+    const dummy = document.createElement("input");
+    document.body.appendChild(dummy);
+    dummy.value = gameId;
+    dummy.select();
+    document.execCommand("copy");
+    document.body.removeChild(dummy);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  // --- UI Components ---
+
+  if (!user) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-slate-50">
+        <div className="animate-pulse text-indigo-600 font-medium text-lg">Initializing Game...</div>
+      </div>
+    );
+  }
+
+  if (!gameId) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <div className="bg-white p-8 rounded-3xl shadow-xl w-full max-w-md border border-slate-100">
+          <div className="flex justify-center mb-6">
+            <div className="bg-indigo-50 p-4 rounded-2xl">
+              <Trophy className="w-12 h-12 text-indigo-600" />
+            </div>
+          </div>
+          <h1 className="text-3xl font-black text-center text-slate-800 mb-2 italic">TIC-TAC-TOE</h1>
+          <p className="text-slate-500 text-center mb-10">Real-time Multiplayer Battle</p>
+
+          <button 
+            onClick={createGame}
+            className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 px-4 rounded-2xl transition-all shadow-lg shadow-indigo-200 flex items-center justify-center gap-3 mb-6"
+          >
+            <Plus className="w-6 h-6" /> Create Private Room
+          </button>
+
+          <div className="relative flex items-center mb-6">
+            <div className="flex-grow border-t border-slate-200"></div>
+            <span className="flex-shrink mx-4 text-slate-400 text-xs font-bold uppercase tracking-widest">or join a friend</span>
+            <div className="flex-grow border-t border-slate-200"></div>
+          </div>
+
+          <div className="space-y-4">
+            <input 
+              type="text"
+              placeholder="ROOM CODE"
+              value={inputGameId}
+              onChange={(e) => setInputGameId(e.target.value.toUpperCase())}
+              className="w-full px-4 py-4 border-2 border-slate-100 rounded-2xl focus:outline-none focus:border-indigo-500 uppercase font-mono text-center text-xl tracking-[0.5em] placeholder:tracking-normal placeholder:text-sm"
+            />
+            <button 
+              onClick={() => joinGame(inputGameId)}
+              disabled={!inputGameId}
+              className="w-full bg-slate-800 hover:bg-slate-900 disabled:bg-slate-200 text-white font-bold py-4 px-4 rounded-2xl transition-all flex items-center justify-center gap-3"
+            >
+              <LogIn className="w-5 h-5" /> Join Battle
+            </button>
+          </div>
+
+          {error && <p className="mt-4 text-rose-500 text-sm text-center bg-rose-50 p-3 rounded-xl border border-rose-100">{error}</p>}
+        </div>
+      </div>
+    );
+  }
+
+  const myRole = user.uid === gameState?.playerX ? 'X' : (user.uid === gameState?.playerO ? 'O' : 'Spectator');
+  const isMyTurn = gameState?.turn === myRole && gameState?.status === 'playing';
+
+  return (
+    <div className="min-h-screen bg-slate-50 p-4 md:p-12">
+      <div className="max-w-xl mx-auto">
+        {/* Top Navigation */}
+        <div className="flex justify-between items-center mb-8">
+          <button 
+            onClick={() => { setGameId(''); setGameState(null); }}
+            className="p-2 hover:bg-white rounded-full transition-colors text-slate-400 hover:text-rose-500"
+          >
+            <LogOut className="w-6 h-6" />
+          </button>
+          <div className="flex items-center gap-2 bg-white px-4 py-2 rounded-2xl shadow-sm border border-slate-100">
+            <span className="text-xs font-bold text-slate-400 uppercase tracking-tighter">Room Code</span>
+            <span className="font-mono font-bold text-indigo-600 text-lg">{gameId}</span>
+            <button 
+              onClick={copyCode}
+              className="ml-2 p-1.5 hover:bg-indigo-50 rounded-lg transition-colors text-indigo-400"
+            >
+              {copied ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
+            </button>
+          </div>
+        </div>
+
+        {/* Players Indicator */}
+        <div className="grid grid-cols-2 gap-4 mb-8">
+          <div className={`p-4 rounded-3xl bg-white border-2 transition-all ${gameState?.turn === 'X' ? 'border-indigo-500 shadow-md scale-105' : 'border-transparent opacity-60'}`}>
+            <div className="flex items-center justify-between mb-1">
+              <X className={`w-6 h-6 ${gameState?.turn === 'X' ? 'text-indigo-600' : 'text-slate-400'}`} />
+              <span className="text-[10px] font-bold uppercase text-slate-400">Player X</span>
+            </div>
+            <p className="text-xs truncate font-medium text-slate-600">{myRole === 'X' ? 'You' : 'Opponent'}</p>
+          </div>
+          <div className={`p-4 rounded-3xl bg-white border-2 transition-all ${gameState?.turn === 'O' ? 'border-rose-500 shadow-md scale-105' : 'border-transparent opacity-60'}`}>
+            <div className="flex items-center justify-between mb-1">
+              <Circle className={`w-5 h-5 ${gameState?.turn === 'O' ? 'text-rose-500' : 'text-slate-400'}`} />
+              <span className="text-[10px] font-bold uppercase text-slate-400">Player O</span>
+            </div>
+            <p className="text-xs truncate font-medium text-slate-600">{myRole === 'O' ? 'You' : (gameState?.playerO ? 'Opponent' : 'Waiting...')}</p>
+          </div>
+        </div>
+
+        {/* Status Message */}
+        <div className="text-center mb-8">
+          {gameState?.status === 'waiting' ? (
+            <div className="inline-flex items-center gap-2 px-4 py-2 bg-amber-50 text-amber-700 rounded-full text-sm font-bold animate-pulse border border-amber-100">
+               Waiting for player O to join...
+            </div>
+          ) : gameState?.winner ? (
+            <div className="inline-flex flex-col items-center">
+              <span className="text-slate-400 uppercase text-xs font-black tracking-widest mb-1">Game Over</span>
+              <span className="text-2xl font-black text-slate-800">
+                {gameState.winner === 'draw' ? "IT'S A DRAW!" : `PLAYER ${gameState.winner} WINS!`}
+              </span>
+            </div>
+          ) : (
+            <div className="inline-flex flex-col items-center">
+              <span className="text-slate-400 uppercase text-xs font-black tracking-widest mb-1">Game Status</span>
+              <span className={`text-2xl font-black ${isMyTurn ? 'text-indigo-600' : 'text-slate-800 opacity-40'}`}>
+                {isMyTurn ? "YOUR TURN" : "THEIR TURN"}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Board */}
+        <div className="grid grid-cols-3 gap-4 bg-slate-200 p-4 rounded-[2.5rem] shadow-inner mb-10 aspect-square max-w-sm mx-auto">
+          {gameState?.board.map((cell, idx) => (
+            <button
+              key={idx}
+              onClick={() => makeMove(idx)}
+              className={`flex items-center justify-center rounded-[1.5rem] bg-white text-5xl shadow-sm transition-all
+                ${!cell && isMyTurn ? 'hover:bg-indigo-50 active:scale-90 hover:shadow-md cursor-pointer' : 'cursor-default'}
+                ${cell === 'X' ? 'text-indigo-600' : 'text-rose-500'}`}
+            >
+              {cell === 'X' && <X className="w-16 h-16 stroke-[3px]" />}
+              {cell === 'O' && <Circle className="w-14 h-14 stroke-[3px]" />}
+            </button>
+          ))}
+        </div>
+
+        {/* Action Buttons */}
+        <div className="flex gap-4 justify-center">
+          <button 
+            onClick={resetGame}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 px-8 rounded-2xl shadow-lg shadow-indigo-100 flex items-center justify-center gap-3 transition-all active:scale-95"
+          >
+            <RefreshCw className="w-5 h-5" /> Play Again
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default App;
+
